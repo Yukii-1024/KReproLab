@@ -1,0 +1,16 @@
+[project]
+name = "kreprolab"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "deepseek-harness-sdk>=0.2.2rc2",
+]
+
+[project.scripts]
+kreprolab = "kreprolab:main"
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
