@@ -90,12 +90,48 @@ def _fetch_record(cve_id: str, attempts: list[dict]) -> dict | None:
     return None
 
 
-def _upstream_kernel(product: dict) -> bool:
-    vendor = product.get("vendor", "").casefold()
-    name = product.get("product", "").casefold().replace("_", " ").replace("-", " ")
-    return (vendor in {"linux", "kernel.org"} and name in {"linux", "linux kernel", "kernel"}) or any(
-        cpe.startswith("cpe:2.3:o:linux:linux_kernel:") for cpe in product.get("cpes", [])
+def _kernel_reference(reference: dict) -> bool:
+    url = reference.get("url")
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    return parsed.netloc == "kernel.org" or parsed.netloc.endswith(".kernel.org")
+
+
+def _container_corroboration(container: dict) -> str | None:
+    descriptions = " ".join(
+        item["value"]
+        for item in container.get("descriptions", [])
+        if isinstance(item, dict) and isinstance(item.get("value"), str)
     )
+    if "linux kernel" in descriptions.casefold():
+        return "description"
+    if any(
+        _kernel_reference(reference)
+        for reference in container.get("references", [])
+        if isinstance(reference, dict)
+    ):
+        return "reference"
+    return None
+
+
+def _kernel_scope(product: dict, corroboration: str | None) -> str | None:
+    vendor = str(product.get("vendor", "")).strip().casefold()
+    name = str(product.get("product", "")).casefold().replace("_", " ").replace("-", " ")
+    if vendor in {"linux", "kernel.org"} and name in {"linux", "linux kernel", "kernel"}:
+        return "vendor"
+    if any(
+        cpe.startswith("cpe:2.3:o:linux:linux_kernel:")
+        for cpe in product.get("cpes", [])
+        if isinstance(cpe, str)
+    ):
+        return "cpe"
+    if corroboration and vendor in {"", "n/a", "na", "unknown"} and name in {"linux", "linux kernel", "kernel"}:
+        return corroboration
+    return None
 
 
 def _kernel_fix_links(references: list[dict]) -> list[str]:
@@ -140,10 +176,14 @@ def _summarize(record: dict, source_url: str) -> tuple[dict, str]:
     sources.extend(("adp", adp) for adp in containers.get("adp", []))
     product_fields = ("vendor", "product", "packageName", "defaultStatus", "versions")
     for kind, container in sources:
-        kernel_products = [
-            {field: product[field] for field in product_fields if field in product}
-            for product in container.get("affected", []) if _upstream_kernel(product)
-        ]
+        corroboration = _container_corroboration(container)
+        kernel_products = []
+        for product in container.get("affected", []):
+            scope = _kernel_scope(product, corroboration)
+            if scope:
+                entry = {field: product[field] for field in product_fields if field in product}
+                entry["scope"] = scope
+                kernel_products.append(entry)
         if kernel_products:
             evidence.append({
                 "container": kind,
@@ -196,6 +236,15 @@ def _summarize(record: dict, source_url: str) -> tuple[dict, str]:
     else:
         report["coverage"] = "reported_upstream_versions"
         return report, "completed"
+    report["reported_affected"] = [
+        {
+            "container": kind,
+            "provider": container.get("providerMetadata", {}).get("shortName"),
+            "products": products,
+        }
+        for kind, container in sources
+        if (products := container.get("affected"))
+    ]
     return report, "partial"
 
 
@@ -224,6 +273,8 @@ def collect_cve(cve_id: str, model: str, runtime_root: Path) -> tuple[Path, str]
             report, report_status = _summarize(record, attempts[-1]["url"])
             _write_json(directory / "cve.json", report)
             status = report_status
+            if "coverage" in report:
+                manifest["coverage"] = report["coverage"]
     except (AttributeError, KeyError, TypeError, ValueError):
         status = "failed"
         manifest["error"] = "CVE record contains unsupported or malformed fields"

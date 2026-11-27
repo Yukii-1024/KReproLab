@@ -5,6 +5,7 @@ from deepseek_harness.errors import HarnessError
 
 from .affected import affected_linux_version
 from .cve import collect_cve, normalize_cve_id
+from .kernel_build import build_kernel_image
 from .model import ModelConfig, open_harness
 from .source import download_linux_source
 from .trigger_config import prepare_trigger_config
@@ -30,6 +31,12 @@ def main() -> None:
         except (OSError, ValueError) as error:
             parser.exit(1, f"CVE collection error: {error}\n")
         print(f"{directory} ({status})")
+        if status == "partial":
+            parser.exit(
+                1,
+                "CVE collection incomplete: insufficient upstream Linux scope or version evidence. "
+                f"See {directory / 'cve.json'} (coverage, reported_affected).\n",
+            )
         if status != "completed":
             parser.exit(1)
         try:
@@ -50,6 +57,14 @@ def main() -> None:
         print(artifacts.trigger_config)
         print(artifacts.resolved_config)
         print(artifacts.report)
+        try:
+            build = build_kernel_image(directory, version)
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"Kernel build error: {error}\n")
+        print(build.image)
+        print(build.report)
+        if build.modules is not None:
+            print(build.modules)
         return
 
     try:

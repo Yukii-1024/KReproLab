@@ -32,6 +32,7 @@ RESOLVED_CONFIG = "resolved.config"
 REPORT = "trigger-config.json"
 AGENT_RUN = "agent-run.json"
 DSH_HOME = ".dsh"
+BUILD_DIRECTORY = "build"
 KCONFIG_TIMEOUT_SECONDS = 300
 
 _REQUIRED_KEYS = {
@@ -41,6 +42,7 @@ _REQUIRED_KEYS = {
     "arch",
     "base_config",
     "trigger_config",
+    "gating_kind",
     "gating_symbols",
     "candidate_symbols",
     "affected_files",
@@ -75,8 +77,8 @@ Workspace (current directory):
 
 Do this:
 1. Evidence (Stage I): read cve.json. If descriptions is missing, use title and fix references. Locate the affected source files/functions. Do not trust CVE version claims; use the target source. Use targeted grep/sed; do not dump large files.
-2. Candidate identification (Stage II): map the affected object to its Kconfig gating symbol(s) via Kconfig/Makefile. Find the options needed for those symbols to resolve to y or m. Check dependencies with targeted Kconfig inspection; if the toolchain works, use `make O=<build> x86_64_defconfig`, merge your fragment, and `make O=<build> olddefconfig` to detect silent drops.
-3. Minimality (Stage III): propose a superset of candidates. A deterministic step will re-run olddefconfig and greedily remove options while all gating symbols stay enabled. Do not include debug/QEMU/test options in trigger.config; record useful test options under test_environment instead.
+2. Candidate identification (Stage II): map the affected object to its Kconfig gating symbol(s) via Kconfig/Makefile. If the object is compiled unconditionally (for example core code in an always-built object), set gating_kind to unconditional and do not invent a symbol. Find the options needed for config gating symbols to resolve to y or m. Check dependencies with targeted Kconfig inspection; if the toolchain works, use `make O=<build> x86_64_defconfig`, merge your fragment, and `make O=<build> olddefconfig` to detect silent drops.
+3. Minimality (Stage III): propose a superset of candidates. A deterministic step will re-run olddefconfig and greedily remove options while all gating symbols stay enabled. An empty trigger.config is valid for unconditional code. Do not include debug/QEMU/test options in trigger.config; record useful test options under test_environment instead.
 
 Write in the current directory:
 
@@ -93,6 +95,7 @@ trigger-config.json with at least:
   "arch": "{ARCH}",
   "base_config": "{BASE_CONFIG}",
   "trigger_config": "{TRIGGER_CONFIG}",
+  "gating_kind": "config",
   "gating_symbols": ["CONFIG_..."],
   "candidate_symbols": [
     {{"name": "CONFIG_...", "value": "y", "reason": "...", "evidence": "Kconfig or source file:line"}}
@@ -102,14 +105,14 @@ trigger-config.json with at least:
   "rationale": "why these options are the minimal trigger set"
 }}
 Optional keys: dependency_closure, test_environment, build_commands, risks.
-`gating_symbols` must be non-empty and every CONFIG line in trigger.config must appear in candidate_symbols.
+`gating_kind` must be `config` or `unconditional`. For `config`, `gating_symbols` must be non-empty; for `unconditional`, it must be empty and evidence must explain why the code is always compiled. Every CONFIG line in trigger.config must appear in candidate_symbols.
 
 Constraints:
 - Do not modify linux-{version}/, do not run make all or build the kernel, do not download anything, and do not install packages.
 - Kconfig-only commands (defconfig/merge_config/olddefconfig) are allowed; do not leave build products in the source tree.
 - Do not ask questions. Record assumptions and uncertainty under risks.
-- A deterministic audit will rerun olddefconfig, verify gating symbols, minimize the fragment, and write resolved.config; its result is authoritative.
-- The final reply should summarize the affected code path, gating symbols, and files generated.
+- A deterministic audit will rerun olddefconfig, verify gating symbols (if any), minimize the fragment, and write resolved.config; its result is authoritative.
+- The final reply should summarize the affected code path, gating symbols or unconditional evidence, and files generated.
 """
 
 
@@ -189,9 +192,16 @@ def validate_trigger_artifacts(
     if data["trigger_config"] != TRIGGER_CONFIG:
         raise ValueError(f"{REPORT}: trigger_config must be {TRIGGER_CONFIG!r}")
 
+    gating_kind = data["gating_kind"]
+    if gating_kind not in {"config", "unconditional"}:
+        raise ValueError(f"{REPORT}: gating_kind must be 'config' or 'unconditional'")
     gating = data["gating_symbols"]
-    if not _is_config_list(gating) or not gating:
-        raise ValueError(f"{REPORT}: gating_symbols must be a non-empty array of CONFIG_ names")  # noqa: TRY004
+    if not _is_config_list(gating):
+        raise ValueError(f"{REPORT}: gating_symbols must be an array of CONFIG_ names")  # noqa: TRY004
+    if gating_kind == "config" and not gating:
+        raise ValueError(f"{REPORT}: config gating requires non-empty gating_symbols")
+    if gating_kind == "unconditional" and gating:
+        raise ValueError(f"{REPORT}: unconditional gating requires empty gating_symbols")
     if len(set(gating)) != len(gating):
         raise ValueError(f"{REPORT}: gating_symbols contains duplicates")
 
@@ -301,7 +311,7 @@ def audit_trigger_config(
          "resolved_config": Path | None, "resolved": dict | None}
     """
     source = Path(source).resolve()
-    run_directory = Path(run_directory)
+    run_directory = Path(run_directory).resolve()
     entries = _parse_fragment(trigger_text)
     failure_validation = {
         "method": "kernel-olddefconfig",
@@ -431,7 +441,7 @@ def prepare_trigger_config(
     run_directory: str | Path, version: str, config: ModelConfig
 ) -> TriggerArtifacts:
     """调用 DSH Agent 推断最小触发配置，运行 olddefconfig 校验/最小化并返回产物路径。"""
-    run_directory = Path(run_directory)
+    run_directory = Path(run_directory).resolve()
     cve = _read_json(run_directory / "cve.json")
     cve_id = cve.get("cve_id")
     if not isinstance(cve_id, str) or not cve_id:
@@ -440,9 +450,11 @@ def prepare_trigger_config(
     if not source.is_dir():
         raise FileNotFoundError(f"kernel source directory is missing: {source}")
 
-    report_path = run_directory / REPORT
-    trigger_path = run_directory / TRIGGER_CONFIG
-    resolved_path = run_directory / RESOLVED_CONFIG
+    artifact_directory = run_directory / BUILD_DIRECTORY
+    artifact_directory.mkdir(parents=True, exist_ok=True)
+    report_path = artifact_directory / REPORT
+    trigger_path = artifact_directory / TRIGGER_CONFIG
+    resolved_path = artifact_directory / RESOLVED_CONFIG
     if report_path.is_file() and trigger_path.is_file() and resolved_path.is_file():
         data = _read_json(report_path)
         if data.get("validation", {}).get("status") == "ok":
@@ -451,7 +463,7 @@ def prepare_trigger_config(
     prompt = _build_prompt(cve_id, version)
     started = datetime.now().astimezone()
     trace = _trace_base(cve_id, version, config, prompt, started)
-    trace_path = run_directory / AGENT_RUN
+    trace_path = artifact_directory / AGENT_RUN
     try:
         with open_harness(
             config,
@@ -466,7 +478,7 @@ def prepare_trigger_config(
             status="failed",
             finished_at=datetime.now().astimezone().isoformat(),
             error=str(error).replace(config.api_key, "[redacted]"),
-            artifacts=_artifacts(run_directory),
+            artifacts=_artifacts(artifact_directory),
         )
         _write_json(trace_path, trace)
         raise
@@ -481,9 +493,13 @@ def prepare_trigger_config(
     try:
         if result.finish_reason != "completed":
             raise ValueError(f"agent did not complete: {result.finish_reason or 'no finish reason'}")
-        report_path, data, _entries, trigger_text = validate_trigger_artifacts(run_directory, cve_id, version)
-        (run_directory / CANDIDATE_CONFIG).write_text(trigger_text, encoding="utf-8")
-        audit = audit_trigger_config(source, trigger_text, data["gating_symbols"], run_directory)
+        for name in (TRIGGER_CONFIG, REPORT):
+            produced = run_directory / name
+            if produced.is_file():
+                produced.replace(artifact_directory / name)
+        report_path, data, _entries, trigger_text = validate_trigger_artifacts(artifact_directory, cve_id, version)
+        (artifact_directory / CANDIDATE_CONFIG).write_text(trigger_text, encoding="utf-8")
+        audit = audit_trigger_config(source, trigger_text, data["gating_symbols"], artifact_directory)
         data["validation"] = audit["validation"]
         data["minimization"] = audit["minimization"]
         if audit["resolved_config"] is not None:
@@ -502,7 +518,7 @@ def prepare_trigger_config(
             error=str(error),
             validation=data.get("validation") if "data" in locals() else None,
             minimization=data.get("minimization") if "data" in locals() else None,
-            artifacts=_artifacts(run_directory),
+            artifacts=_artifacts(artifact_directory),
         )
         _write_json(trace_path, trace)
         raise
@@ -512,7 +528,7 @@ def prepare_trigger_config(
         finished_at=datetime.now().astimezone().isoformat(),
         validation=data["validation"],
         minimization=data["minimization"],
-        artifacts=_artifacts(run_directory),
+        artifacts=_artifacts(artifact_directory),
     )
     _write_json(trace_path, trace)
     return TriggerArtifacts(report_path, trigger_path, resolved_path)

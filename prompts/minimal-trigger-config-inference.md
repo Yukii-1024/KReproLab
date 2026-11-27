@@ -51,8 +51,8 @@ Workspace (current directory):
 
 Do this:
 1. Evidence (Stage I): read cve.json. If descriptions is missing, use title and fix references. Locate the affected source files/functions. Do not trust CVE version claims; use the target source. Use targeted grep/sed; do not dump large files.
-2. Candidate identification (Stage II): map the affected object to its Kconfig gating symbol(s) via Kconfig/Makefile. Find the options needed for those symbols to resolve to y or m. Check dependencies with targeted Kconfig inspection; if the toolchain works, use `make O=<build> x86_64_defconfig`, merge your fragment, and `make O=<build> olddefconfig` to detect silent drops.
-3. Minimality (Stage III): propose a superset of candidates. A deterministic step will re-run olddefconfig and greedily remove options while all gating symbols stay enabled. Do not include debug/QEMU/test options in trigger.config; record useful test options under test_environment instead.
+2. Candidate identification (Stage II): map the affected object to its Kconfig gating symbol(s) via Kconfig/Makefile. If the object is compiled unconditionally (for example core code in an always-built object), set gating_kind to unconditional and do not invent a symbol. Find the options needed for config gating symbols to resolve to y or m. Check dependencies with targeted Kconfig inspection; if the toolchain works, use `make O=<build> x86_64_defconfig`, merge your fragment, and `make O=<build> olddefconfig` to detect silent drops.
+3. Minimality (Stage III): propose a superset of candidates. A deterministic step will re-run olddefconfig and greedily remove options while all gating symbols stay enabled. An empty trigger.config is valid for unconditional code. Do not include debug/QEMU/test options in trigger.config; record useful test options under test_environment instead.
 
 Write in the current directory:
 
@@ -69,6 +69,7 @@ trigger-config.json with at least:
   "arch": "x86_64",
   "base_config": "x86_64_defconfig",
   "trigger_config": "trigger.config",
+  "gating_kind": "config",
   "gating_symbols": ["CONFIG_..."],
   "candidate_symbols": [
     {"name": "CONFIG_...", "value": "y", "reason": "...", "evidence": "Kconfig or source file:line"}
@@ -78,27 +79,33 @@ trigger-config.json with at least:
   "rationale": "why these options are the minimal trigger set"
 }
 Optional keys: dependency_closure, test_environment, build_commands, risks.
-`gating_symbols` must be non-empty and every CONFIG line in trigger.config must appear in candidate_symbols.
+`gating_kind` must be `config` or `unconditional`. For `config`, `gating_symbols` must be non-empty; for `unconditional`, it must be empty and evidence must explain why the code is always compiled. Every CONFIG line in trigger.config must appear in candidate_symbols.
 
 Constraints:
 - Do not modify linux-{version}/, do not run make all or build the kernel, do not download anything, and do not install packages.
 - Kconfig-only commands (defconfig/merge_config/olddefconfig) are allowed; do not leave build products in the source tree.
 - Do not ask questions. Record assumptions and uncertainty under risks.
-- A deterministic audit will rerun olddefconfig, verify gating symbols, minimize the fragment, and write resolved.config; its result is authoritative.
-- The final reply should summarize the affected code path, gating symbols, and files generated.
+- A deterministic audit will rerun olddefconfig, verify gating symbols (if any), minimize the fragment, and write resolved.config; its result is authoritative.
+- The final reply should summarize the affected code path, gating symbols or unconditional evidence, and files generated.
 ```
 
 ## Deterministic audit
 
 After the agent turn, the same run directory is processed by the kernel's own
-Kconfig engine:
+Kconfig engine. The inference artifacts and temporary Kconfig build directory
+live under `build/`; the agent's `trigger.config` and `trigger-config.json` are
+moved there before validation.
 
 1. `make O=<build> x86_64_defconfig`
 2. merge the candidate `trigger.config`
 3. `make O=<build> olddefconfig`
-4. verify every `gating_symbols` entry resolves to `y` or `m`
+4. verify every `gating_symbols` entry (if any) resolves to `y` or `m`
 5. greedily remove candidate options while all gating symbols remain enabled
 6. copy the resolved config to `resolved.config`
+
+For `gating_kind: unconditional`, `gating_symbols` is empty and the audit removes
+all candidate options; `trigger.config` becomes an empty fragment and
+`resolved.config` is the baseline configuration.
 
 The audit is authoritative; agent claims about validation are overwritten. If a
 gating symbol is dropped or the toolchain/source tree is unavailable, the stage
@@ -106,19 +113,25 @@ fails and preserves the agent artifacts for inspection.
 
 ## Artifacts
 
+The agent writes `trigger.config` and `trigger-config.json` in the run directory;
+the orchestrator archives them under `build/` and writes the remaining inference
+artifacts there.
+
 | File | Contents |
 | --- | --- |
-| `trigger.candidate.config` | Original fragment proposed by the agent. |
-| `trigger.config` | Minimized Kconfig fragment produced by the audit. |
-| `resolved.config` | Full config after defconfig + merge + olddefconfig; build input. |
-| `trigger-config.json` | Evidence, gating/candidate symbols, validation, minimization. |
-| `agent-run.json` | Agent result text, events, notifications, and audit summary. |
+| `build/trigger.candidate.config` | Original fragment proposed by the agent. |
+| `build/trigger.config` | Minimized Kconfig fragment produced by the audit. |
+| `build/resolved.config` | Full config after defconfig + merge + olddefconfig; build input. |
+| `build/trigger-config.json` | Evidence, gating/candidate symbols, validation, minimization. |
+| `build/agent-run.json` | Agent result text, events, notifications, and audit summary. |
 | `.dsh/` | DSH home and JSONL session logs. |
 
 ## Current limitations
 
 - `kconfig-mcp` is not integrated; dependency explanation is agent-driven and
   `olddefconfig` provides the hard constraint check.
+- For unconditional code, the audit cannot compile or run the vulnerable object
+  to prove the status; it relies on the agent's source/Makefile evidence.
 - Minimization is Kconfig-level (`runtime_validated: false`); there is no
   build/PoC runtime oracle yet.
 - The audit requires a kernel toolchain (`make`, `gcc`, `flex`, `bison`, `bc`,
