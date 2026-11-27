@@ -1,7 +1,7 @@
-"""从 runtime/<run 目录>/cve.json 中筛选受影响的 Linux 内核版本号。
+"""从 collect_cve 产出的 run 目录中筛选受影响的 Linux 内核版本号。
 
-调用方只传 run 目录名（如 "20261127deepseek-flash-1"）；
-cve.json 路径基于本模块位置解析：src/kreprolab -> 仓库根 -> runtime/<目录>/cve.json。
+调用方传入 collect_cve() 返回的 run 目录（如 "runtime/20261127deepseek-flash-1"），
+本模块读取该目录下的 cve.json。
 
 筛选规则：upstream_kernel[].products[].versions[] 中 status == "affected"
 且 version 为纯点分数字（排除 git commit hash）的第一个条目。
@@ -11,7 +11,6 @@ import json
 import re
 from pathlib import Path
 
-_RUNTIME_ROOT = Path(__file__).resolve().parents[2] / "runtime"
 _VERSION_RE = re.compile(r"\d+(?:\.\d+)*")
 
 
@@ -19,16 +18,16 @@ def affected_linux_version(run_directory: str | Path) -> str:
     """返回指定 run 目录的 cve.json 中被标注为受影响的 Linux 内核版本号。
 
     Args:
-        run_directory: runtime/ 下的目录名，如 "20261127deepseek-flash-1"。
+        run_directory: collect_cve() 返回的 run 目录路径。
 
     Returns:
-        版本号字符串，如 "6.0"。
+        版本号字符串，如 "6.8"。
 
     Raises:
         FileNotFoundError: cve.json 不存在。
         ValueError: JSON 不合法，或其中没有受影响的版本号条目。
     """
-    path = _RUNTIME_ROOT / run_directory / "cve.json"
+    path = Path(run_directory) / "cve.json"
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:

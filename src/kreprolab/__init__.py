@@ -3,6 +3,7 @@ from pathlib import Path
 
 from deepseek_harness.errors import HarnessError
 
+from .affected import affected_linux_version
 from .cve import collect_cve, normalize_cve_id
 from .model import ModelConfig, open_harness
 
@@ -25,6 +26,11 @@ def main() -> None:
         print(f"{directory} ({status})")
         if status != "completed":
             parser.exit(1)
+        try:
+            version = affected_linux_version(directory)
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"CVE version extraction error: {error}\n")
+        print(version)
         return
 
     try:
