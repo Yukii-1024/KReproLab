@@ -6,6 +6,7 @@ from deepseek_harness.errors import HarnessError
 from .affected import affected_linux_version
 from .cve import collect_cve, normalize_cve_id
 from .model import ModelConfig, open_harness
+from .source import download_linux_source
 
 
 def main() -> None:
@@ -31,6 +32,11 @@ def main() -> None:
         except (OSError, ValueError) as error:
             parser.exit(1, f"CVE version extraction error: {error}\n")
         print(version)
+        try:
+            source = download_linux_source(version, directory)
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"Kernel source download error: {error}\n")
+        print(source)
         return
 
     try:
