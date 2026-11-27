@@ -1,6 +1,6 @@
 import json
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,10 +14,6 @@ class ModelConfig:
     base_url: str
     api_key: str = field(repr=False)
     model: str
-
-    @classmethod
-    def load_name(cls, path: Path) -> str:
-        return cls._require_field(path, cls._read_fields(path), "model")
 
     @staticmethod
     def _read_fields(path: Path) -> dict:
@@ -59,48 +55,71 @@ class ModelConfig:
         return cls(base_url=base_url, api_key=api_key, model=model)
 
 
-@contextmanager
-def open_harness(config: ModelConfig) -> Iterator[DeepSeekHarness]:
-    provider = "kreprolab-openai"
-    key_env = "KREPROLAB_MODEL_API_KEY"
+def _harness_patch(config: ModelConfig, tools: bool) -> list[dict]:
     patch = [
         {"id": "session-log-deepseek", "disabled": True},
         {"id": "plugin-package-inventory-deepseek", "disabled": True},
-        {"id": "persistent-bash", "disabled": True},
-        {"id": "persistent-pwsh", "disabled": True},
-        {"id": "tool-fs", "disabled": True},
-        {"id": "tool-working-directory", "disabled": True},
-        {
-            "insert": [
-                {
-                    "id": "llm-pi-ai",
-                    "name": "@deepseek-ai/dsh-llm-pi-ai",
-                    "config": {
-                        "providers": {
-                            provider: {
-                                "api": "openai-completions",
-                                "apiKeyEnv": key_env,
-                                "baseURL": config.base_url,
-                                "models": [{"id": config.model}],
-                                "retryPolicy": {"mode": "normal", "maxRetries": 0},
-                            },
+    ]
+    if not tools:
+        patch.extend([
+            {"id": "persistent-bash", "disabled": True},
+            {"id": "persistent-pwsh", "disabled": True},
+            {"id": "tool-fs", "disabled": True},
+            {"id": "tool-working-directory", "disabled": True},
+        ])
+    patch.append({
+        "insert": [
+            {
+                "id": "llm-pi-ai",
+                "name": "@deepseek-ai/dsh-llm-pi-ai",
+                "config": {
+                    "providers": {
+                        "kreprolab-openai": {
+                            "api": "openai-completions",
+                            "apiKeyEnv": "KREPROLAB_MODEL_API_KEY",
+                            "baseURL": config.base_url,
+                            "models": [{"id": config.model}],
+                            "retryPolicy": {"mode": "normal", "maxRetries": 0},
                         },
                     },
                 },
-            ],
-        },
-    ]
-    with TemporaryDirectory(prefix="kreprolab-") as directory:
+            },
+        ],
+    })
+    return patch
+
+
+@contextmanager
+def open_harness(
+    config: ModelConfig,
+    *,
+    dsh_home: Path | None = None,
+    cwd: Path | None = None,
+    tools: bool = False,
+    system_prompt: str | None = None,
+) -> Iterator[DeepSeekHarness]:
+    env = {"KREPROLAB_MODEL_API_KEY": config.api_key}
+    if system_prompt is not None:
+        env["DSH_SYSTEM_PROMPT"] = system_prompt
+    with ExitStack() as stack:
+        if dsh_home is None:
+            home = Path(stack.enter_context(TemporaryDirectory(prefix="kreprolab-")))
+        else:
+            home = Path(dsh_home).resolve()
+            home.mkdir(parents=True, exist_ok=True)
         # JSON is valid YAML, including quoting for model IDs and API URLs.
-        patch_path = Path(directory) / "model.patch.yml"
-        patch_path.write_text(json.dumps(patch), encoding="utf-8")
+        patch_path = home / "model.patch.yml"
+        patch_path.write_text(json.dumps(_harness_patch(config, tools)), encoding="utf-8")
+        workspace = str(Path(cwd).resolve()) if cwd is not None else None
         harness = DeepSeekHarness(DeepSeekHarnessConfig(
-            provider=provider,
+            provider="kreprolab-openai",
             model=config.model,
             profile="sdk-minimal",
-            dsh_home=directory,
+            dsh_home=str(home),
             patches=(str(patch_path),),
-            env={key_env: config.api_key},
+            env=env,
+            cwd=workspace,
+            runtime_cwd=workspace,
         ))
         try:
             harness.start()

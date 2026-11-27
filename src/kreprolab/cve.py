@@ -153,6 +153,14 @@ def _summarize(record: dict, source_url: str) -> tuple[dict, str]:
             })
     report.update(
         title=cna.get("title"),
+        descriptions=[
+            {"container": kind, "lang": item.get("lang"), "value": item["value"]}
+            for kind, container in sources
+            for item in container.get("descriptions", [])
+            if isinstance(item, dict)
+            and isinstance(item.get("value"), str)
+            and item["value"].strip()
+        ],
         cwe_ids=sorted({
             item["cweId"]
             for _, container in sources

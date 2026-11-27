@@ -7,6 +7,7 @@ from .affected import affected_linux_version
 from .cve import collect_cve, normalize_cve_id
 from .model import ModelConfig, open_harness
 from .source import download_linux_source
+from .trigger_config import prepare_trigger_config
 
 
 def main() -> None:
@@ -17,11 +18,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    try:
+        config = ModelConfig.load(args.config)
+    except (OSError, ValueError) as error:
+        parser.exit(1, f"Model configuration error: {error}\n")
+
     if args.cve is not None:
         try:
             cve_id = normalize_cve_id(args.cve)
-            model = ModelConfig.load_name(args.config)
-            directory, status = collect_cve(cve_id, model, Path("runtime"))
+            directory, status = collect_cve(cve_id, config.model, Path("runtime"))
         except (OSError, ValueError) as error:
             parser.exit(1, f"CVE collection error: {error}\n")
         print(f"{directory} ({status})")
@@ -37,12 +42,15 @@ def main() -> None:
         except (OSError, ValueError) as error:
             parser.exit(1, f"Kernel source download error: {error}\n")
         print(source)
+        try:
+            artifacts = prepare_trigger_config(directory, version, config)
+        except (HarnessError, OSError, TimeoutError, ValueError) as error:
+            message = str(error).replace(config.api_key, "[redacted]")
+            parser.exit(1, f"Trigger config inference error: {message}\n")
+        print(artifacts.trigger_config)
+        print(artifacts.resolved_config)
+        print(artifacts.report)
         return
-
-    try:
-        config = ModelConfig.load(args.config)
-    except (OSError, ValueError) as error:
-        parser.exit(1, f"Model configuration error: {error}\n")
 
     try:
         with open_harness(config) as harness:
