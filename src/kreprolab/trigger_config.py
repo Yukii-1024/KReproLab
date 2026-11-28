@@ -124,7 +124,7 @@ def _read_json(path: Path) -> dict:
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise ValueError(f"invalid UTF-8 JSON in {path}: {error}") from error
     if not isinstance(data, dict):
-        raise ValueError(f"{path} must contain a JSON object")
+        raise ValueError(f"{path} must contain a JSON object")  # noqa: TRY004
     return data
 
 
@@ -197,7 +197,7 @@ def validate_trigger_artifacts(
         raise ValueError(f"{REPORT}: gating_kind must be 'config' or 'unconditional'")
     gating = data["gating_symbols"]
     if not _is_config_list(gating):
-        raise ValueError(f"{REPORT}: gating_symbols must be an array of CONFIG_ names")  # noqa: TRY004
+        raise ValueError(f"{REPORT}: gating_symbols must be an array of CONFIG_ names")
     if gating_kind == "config" and not gating:
         raise ValueError(f"{REPORT}: config gating requires non-empty gating_symbols")
     if gating_kind == "unconditional" and gating:
@@ -211,7 +211,7 @@ def validate_trigger_artifacts(
     candidate_names = set()
     for index, item in enumerate(candidates):
         if not isinstance(item, dict):
-            raise ValueError(f"{REPORT}: candidate_symbols[{index}] must be an object")
+            raise ValueError(f"{REPORT}: candidate_symbols[{index}] must be an object")  # noqa: TRY004
         name = item.get("name")
         if not isinstance(name, str) or not _SYMBOL.fullmatch(name):
             raise ValueError(f"{REPORT}: candidate_symbols[{index}].name is invalid")
